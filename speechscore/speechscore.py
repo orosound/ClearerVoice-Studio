@@ -1,8 +1,18 @@
+# Modified by OROSOUND : 
+# - Added sync_2_files function to synchronize reference audio and audio to test using cross-correlation
+# - Modified audio_reader to include quality of life arguments
+#     * start_margin to exclude the start of the audio from computation
+#     * stop_margin to exclude the end of the audio from computation
+#     * synchronize to sync files using the new sync_2_files function
+#     * max_sync_delay to reduce synchronization to this range (reduce missmatchs)
+#     * plot to print audios and check visually for synchronization errors
+
 import os
 import librosa
 import soundfile as sf
 import resampy
 import numpy as np
+import matplotlib.pyplot as plt
 from scores.srmr.srmr import SRMR
 from scores.dnsmos.dnsmos import DNSMOS
 from scores.pesq import PESQ
@@ -21,6 +31,30 @@ from scores.covl import COVL
 from scores.mcd import MCD
 from scores.nisqa.nisqa import NISQA
 from scores.distill_mos.distill_mos import DISTILL_MOS 
+from scipy.signal import butter, filtfilt
+import scipy.signal as signal
+
+def sync_2_files(reference, degraded_out, max_delay = None):
+    # compute cross correlation between ref and deg files to sync them
+    # if max_delay is provided, restrains it to [-max_delay, +max_delay] samples (ex : avoid mismatch in case of repeating audio)     
+
+    xcorr = 0
+    delay = 0
+    xcorr = signal.correlate(degraded_out, reference)
+    xcorr2 = xcorr[len(reference) - max_delay:len(reference) + max_delay]
+    delay = np.where(xcorr2 == max(xcorr2))[0][0]  - len(xcorr2)//2 + 1
+
+    # sync files
+    if delay < 0:
+        degraded_out = np.append(np.zeros(-delay, dtype = float), degraded_out[:delay])
+    elif delay > 0:
+        degraded_out = np.append(degraded_out[delay:], np.zeros(delay, dtype = float))
+    
+    # reshape to 2D array
+    degraded_out = degraded_out.reshape(-1, 1)
+
+    return reference, degraded_out
+
 
 def compute_mean_results(*results):
     mean_result = {}
@@ -47,9 +81,9 @@ class ScoresList:
 
     def __str__(self):
         return 'Scores: ' + ' '.join([x.name for x in self.scores])
-
-    def __call__(self, test_path, reference_path, window=None, score_rate=None, return_mean=False):
-        """
+    
+    def __call__(self, test_path, reference_path, window = None, score_rate = None, return_mean = False, synchronize = False, max_sync_delay = 3, plot = False, start_margin = 0, stop_margin = 0):
+        """"
         window: float
             the window length in seconds to use for scoring the files.
         score_rate:
@@ -66,17 +100,24 @@ class ScoresList:
             for audio_id in audio_list:
                 results_id = {}                
                 if reference_path is not None:
-                    data = self.audio_reader(test_path+'/'+audio_id, reference_path+'/'+audio_id)
+                    data = self.audio_reader(test_path + '/' + audio_id, reference_path + '/' + audio_id, 
+                                             synchronize = synchronize, max_sync_delay = max_sync_delay, plot = plot, start_margin = start_margin, stop_margin = stop_margin)
                 else:
-                    data = self.audio_reader(test_path+'/'+audio_id, None)
+                    data = self.audio_reader(test_path + '/' + audio_id, None, 
+                                             synchronize = False, start_margin = start_margin, stop_margin = stop_margin)
                 for score in self.scores:
                     result_score = score.scoring(data, window, score_rate)
                     results_id[score.name] = result_score
                 results[audio_id] = results_id
         else:            
-            data = self.audio_reader(test_path, reference_path)
+            data = self.audio_reader(test_path, reference_path, 
+                                     synchronize = synchronize, max_sync_delay = max_sync_delay, plot = plot, start_margin = start_margin, stop_margin = stop_margin)
             for score in self.scores:
-                result_score = score.scoring(data, window, score_rate)
+                try:
+                    result_score = score.scoring(data, window, score_rate)
+                except Exception as e:
+                    print(f'Error computing {score.name} for {test_path}: {e}')
+                    result_score = np.nan
                 results[score.name] = result_score
 
         if return_mean:
@@ -110,7 +151,7 @@ class ScoresList:
         # Return the list of audio file names
         return audio_list
 
-    def audio_reader(self, test_path, reference_path):
+    def audio_reader(self, test_path, reference_path, synchronize = True, max_sync_delay = 3, plot = False, start_margin = 0, stop_margin = 0):
         """loading sound files and making sure they all have the same lengths
             (zero-padding to the largest). Also works with numpy arrays.
         """
@@ -128,11 +169,44 @@ class ScoresList:
             if audio_ref.shape[1] > 1:
                 audio_ref = audio_ref[..., 0, None]
             if rate_test != rate_ref:
-                rate = min(rate_test, rate_ref)
+                rate = min(rate_test, rate_ref, 16000)
             if rate_test != rate:
+                print("resampling test audio to ", rate)
                 audio_test = resampy.resample(audio_test, rate_test, rate, axis=0)
             if rate_ref != rate:
+                print("resampling ref audio to ", rate)
                 audio_ref = resampy.resample(audio_ref, rate_ref, rate, axis=0)
+
+            if synchronize:
+                (audio_test, audio_ref) = sync_2_files(audio_test, audio_ref, max_delay = rate*max_sync_delay)
+                
+                t_min = 1
+                if len(audio_ref) <= t_min*rate or len(audio_test) <= t_min*rate:
+                    print('SYNC ERROR in compute_metrics')
+                    return [], []
+
+                # Check for synchronization issues
+                if plot:
+                    plt.plot(audio_ref, label = 'ref_voice', alpha = 0.7)
+                    plt.plot(audio_test, label = 'deg_voice', alpha = 0.7)
+                    plt.legend()
+                    plt.show()
+
+                    print('len ref voice =', len(audio_ref))
+                    print('len deg voice =', len(audio_test))
+            
+            start_margin_idx = start_margin * rate
+            stop_margin_idx  = stop_margin * rate
+            try:
+                audio_test = audio_test[start_margin_idx: -stop_margin_idx - 1]
+                audio_ref = audio_ref[start_margin_idx: -stop_margin_idx - 1]
+            except:
+                print("audio too short for selected margins ", start_margin, stop_margin, "audio_ref_len = ", len(audio_ref)/rate, "audio_ref_len = ", len(audio_test)/rate, "skipping margins")
+                print("len depends if file has been synchronized or resampled")
+                print("rate = ", rate)
+                print("start_margin", start_margin)
+                print("stop_margin" , stop_margin)
+
             audios += [audio_test]
             audios += [audio_ref]
         else:

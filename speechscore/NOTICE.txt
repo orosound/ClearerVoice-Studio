@@ -1,0 +1,5 @@
+This repository was modified by OROSOUND in this way : 
+
+- "aux.scp" files were renamed to "ox.scp" because windows cannot read aux files
+- dnsmos.py, nisqa.py and sqa.py were modified to include an absolute path to their respective AI models
+- speechscore was modified to include quality of life changes to audio reader (allowing to crop and synchronize files)
