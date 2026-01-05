@@ -1,3 +1,5 @@
+# Modified by OROSOUND : include the absolute path to models
+
 import os
 
 import librosa
@@ -17,8 +19,8 @@ class DNSMOS(ScoreBasis):
         super(DNSMOS, self).__init__(name='DNSMOS')
         self.intrusive = True
         self.score_rate = 16000
-        self.p808_model_path = os.path.join('scores/dnsmos/DNSMOS', 'model_v8.onnx')    
-        self.primary_model_path = os.path.join('scores/dnsmos/DNSMOS', 'sig_bak_ovr.onnx')
+        self.p808_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DNSMOS', 'model_v8.onnx')    
+        self.primary_model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'DNSMOS', 'sig_bak_ovr.onnx')
         self.compute_score = ComputeScore(self.primary_model_path, self.p808_model_path)
 
     def windowed_scoring(self, audios, rate):
